@@ -1,81 +1,54 @@
-import logging
+# -*- coding: utf-8 -*-
+"""
+Mirror Server with embedded Gunicorn launcher.
+"""
+import os
 import requests
 from flask import Flask, jsonify
-import os
-import multiprocessing
 from gunicorn.app.base import BaseApplication
-import time
 
-# --- حافظه‌ی موقت برای جلوگیری از درخواست زیاد به Nobitex ---
-_cache = {}
-CACHE_TTL = 3  # زمان اعتبار کش (۳ ثانیه)
-
-def get_orderbook_from_nobitex(symbol):
-    """گرفتن دفتر سفارش از API نوبیتکس با کشِ زمان‌دار"""
-    cache_key = symbol
-    now = time.time()
-
-    # بررسی کش
-    if cache_key in _cache:
-        data, timestamp = _cache[cache_key]
-        if now - timestamp < CACHE_TTL:
-            logging.info(f"Cache hit برای {symbol}")
-            return data
-
-    # دریافت داده‌ی جدید از Nobitex
-    url = f"https://api.nobitex.ir/v2/orderbook/{symbol}"
-    try:
-        logging.info(f"Fetch تازه برای {symbol}")
-        r = requests.get(url, timeout=5)
-        r.raise_for_status()
-        data = r.json()
-        _cache[cache_key] = (data, now)
-        return data
-    except Exception as e:
-        logging.error(f"خطا هنگام ارتباط با Nobitex: {e}")
-        return {"status": "error", "message": str(e)}, 500
-
-
-# --- تنظیم Flask ---
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+CACHE = {}
+TTL = 3.0  # مدت کش بین درخواست‌ها (ثانیه)
+
+@app.route("/api/orderbook/<symbol>", methods=["GET"])
+def orderbook(symbol: str):
+    import time
+    now = time.time()
+    if symbol in CACHE and now - CACHE[symbol]["time"] < TTL:
+        return jsonify(CACHE[symbol]["data"])
+    try:
+        res = requests.get(f"https://api.nobitex.ir/v2/orderbook/{symbol}")
+        data = res.json()
+        CACHE[symbol] = {"time": now, "data": data}
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
-@app.route('/')
-def home():
-    return "✅ Nobitex Mirror در حال اجراست (embedded gunicorn).", 200
-
-
-@app.route('/api/orderbook/<symbol>')
-def orderbook(symbol):
-    data = get_orderbook_from_nobitex(symbol.upper())
-    if isinstance(data, tuple):
-        return jsonify(data[0]), data[1]
-    return jsonify(data)
-
-
-# --- اجرای داخلی Gunicorn ---
 class StandaloneApplication(BaseApplication):
-    def __init__(self, app, opts=None):
+    """اجرای داخلی گانیکورن (self-contained)"""
+
+    def __init__(self, app, options=None):
+        self.options = options or {}
         self.application = app
-        self.options = opts or {}
         super().__init__()
 
     def load_config(self):
-        for k, v in self.options.items():
-            if k in self.cfg.settings and v is not None:
-                self.cfg.set(k.lower(), v)
+        cfg = self.cfg
+        for key, value in self.options.items():
+            cfg.set(key, value)
 
     def load(self):
         return self.application
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    opts = {
+    port = int(os.getenv("PORT", 10000))
+    options = {
         "bind": f"0.0.0.0:{port}",
-        "workers": (multiprocessing.cpu_count() * 2) + 1,
-        "timeout": 120,
+        "workers": 2,
+        "timeout": 60,
     }
-    logging.info(f"🚀 اجرای Gunicorn داخلی در پورت {port}")
-    StandaloneApplication(app, opts).run()
+    StandaloneApplication(app, options).run()
